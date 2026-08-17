@@ -1,6 +1,11 @@
 # Commands Quick Reference
 
 > 94 slash commands installed globally. Type `/` in any Claude Code session to invoke.
+>
+> For the executable surface, see the [ECC CLI Reference](docs/CLI-REFERENCE.md).
+> For environment variables and secret handling, see the [Environment Reference](docs/ENVIRONMENT.md).
+>
+> This page is limited to slash-command discovery; the executable `ecc` surface is documented separately.
 
 ---
 
