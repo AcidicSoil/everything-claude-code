@@ -429,6 +429,9 @@ if (test('extracts only standalone message options and supports attached or repe
   assert.strictEqual(longForm.message, 'feat: add parser');
   assert.deepStrictEqual(longForm.issues, []);
 
+  const empty = hook.validateCommitMessage('git commit --message=');
+  assert.ok(empty && empty.issues.some(issue => issue.type === 'format' || issue.type === 'subject-empty'));
+
   const dynamic = hook.validateCommitMessage('git commit -m "$MSG"');
   assert.ok(dynamic && dynamic.issues.length > 0, 'dynamic messages should be rejected as unverifiable');
 
@@ -448,6 +451,75 @@ if (test('does not treat unrelated command text as a git commit', () => {
     const result = hook.evaluate(input);
 
     assert.strictEqual(result.exitCode, 0, 'unrelated commands should pass through');
+  });
+})) passed++; else failed++;
+
+if (test('stops extracting message options after git pathspec terminator', () => {
+  assert.strictEqual(hook.validateCommitMessage('git commit -- -m "Bad message"'), null);
+})) passed++; else failed++;
+
+if (test('validates shell wrappers and command substitutions', () => {
+  for (const command of [
+    'sh -c \'git commit -m "fix: Bad subject"\'',
+    'bash -c \'git commit -m "fix: Bad subject"\'',
+    'bash -lc \'git commit -m "fix: Bad subject"\'',
+    'nice git commit -m "fix: Bad subject"',
+    'printf \'%s\' $(git commit -m "fix: Bad subject")',
+    "printf '%s' `git commit -m 'fix: Bad subject'`"
+  ]) {
+    const result = hook.validateCommitMessage(command);
+    assert.ok(result && result.issues.length > 0, `expected wrapped command to be validated: ${command}`);
+  }
+})) passed++; else failed++;
+
+if (test('validates inherited amend messages from HEAD', () => {
+  inTempRepo(repoDir => {
+    writeAndStage(repoDir, 'initial.js', 'const initial = true;\n');
+    spawnSync('git', ['commit', '--no-verify', '-m', 'Bad message'], { cwd: repoDir, stdio: 'pipe', encoding: 'utf8' });
+    writeAndStage(repoDir, 'amend.js', 'const amend = true;\n');
+
+    for (const option of ['--no-edit', '-C HEAD', '--reuse-message=HEAD']) {
+      const input = JSON.stringify({
+        tool_input: { command: `git commit --amend ${option}` }
+      });
+      const result = hook.evaluate(input);
+      assert.strictEqual(result.exitCode, 2, `expected inherited amend message to be blocked: ${option}`);
+    }
+  });
+})) passed++; else failed++;
+
+if (test('uses the repository selected by git global options for inherited messages', () => {
+  inTempRepo(repoDir => {
+    writeAndStage(repoDir, 'outer.js', 'const outer = true;\n');
+    spawnSync('git', ['commit', '--no-verify', '-m', 'feat: outer change'], { cwd: repoDir, stdio: 'pipe', encoding: 'utf8' });
+
+    const selectedRepo = path.join(repoDir, 'selected-repo');
+    fs.mkdirSync(selectedRepo);
+    spawnSync('git', ['init'], { cwd: selectedRepo, stdio: 'pipe', encoding: 'utf8' });
+    spawnSync('git', ['config', 'user.name', 'ECC Test'], { cwd: selectedRepo, stdio: 'pipe', encoding: 'utf8' });
+    spawnSync('git', ['config', 'user.email', 'ecc@example.com'], { cwd: selectedRepo, stdio: 'pipe', encoding: 'utf8' });
+    writeAndStage(selectedRepo, 'selected.js', 'const selected = true;\n');
+    spawnSync('git', ['commit', '--no-verify', '-m', 'Bad message'], { cwd: selectedRepo, stdio: 'pipe', encoding: 'utf8' });
+
+    writeAndStage(repoDir, 'amend.js', 'const amend = true;\n');
+    const input = JSON.stringify({
+      tool_input: { command: `git -C ${selectedRepo} commit --amend --no-edit` }
+    });
+    const result = hook.evaluate(input);
+
+    assert.strictEqual(result.exitCode, 2, 'should validate the selected repository HEAD message');
+  });
+})) passed++; else failed++;
+
+if (test('rejects unsafe inherited-message revisions without writing files', () => {
+  inTempRepo(repoDir => {
+    writeAndStage(repoDir, 'index.js', 'const clean = true;\n');
+    const target = path.join(os.tmpdir(), 'commit-hook-unsafe-revision');
+    fs.rmSync(target, { force: true });
+    const result = hook.validateCommitMessage('git commit --reuse-message=--output=' + target);
+
+    assert.ok(result && result.issues.length > 0, 'unsafe revisions should not bypass validation');
+    assert.strictEqual(fs.existsSync(target), false, 'revision parsing must not create files');
   });
 })) passed++; else failed++;
 

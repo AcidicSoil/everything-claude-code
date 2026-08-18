@@ -282,17 +282,23 @@ function findGitExecutable(tokens, start, end) {
   } else if (first === 'command') {
     index++;
     while (index < end && tokens[index].value.startsWith('-')) index++;
+  } else if (['nice', 'nohup', 'exec'].includes(first)) {
+    index++;
+    while (index < end && tokens[index].value.startsWith('-')) {
+      const option = tokens[index++].value;
+      if (option === '-a' || option === '-n') index++;
+    }
   }
 
   return index < end && isGitExecutable(tokens[index].value) ? index : -1;
 }
 
-function getGitCommitIndices(tokens) {
+function getDirectGitCommitCommandInfo(tokens) {
   const valueOptions = new Set([
     '-C', '--git-dir', '--work-tree', '--namespace', '-c', '--config-env',
     '--exec-path', '--super-prefix'
   ]);
-  const commitIndices = [];
+  const commitInfos = [];
   let segmentStart = 0;
 
   for (let index = 0; index <= tokens.length; index++) {
@@ -301,77 +307,286 @@ function getGitCommitIndices(tokens) {
     const segmentEnd = index;
     const gitIndex = findGitExecutable(tokens, segmentStart, segmentEnd);
     if (gitIndex !== -1) {
+      const gitOptions = [];
       let nextIndex = gitIndex + 1;
       while (nextIndex < segmentEnd) {
         const next = tokens[nextIndex].value;
         if (next === 'commit') {
-          commitIndices.push(nextIndex);
+          commitInfos.push({
+            args: tokens.slice(nextIndex + 1, segmentEnd),
+            gitOptions
+          });
           break;
         }
         if (!next.startsWith('-')) break;
+        gitOptions.push(next);
         nextIndex++;
-        if (valueOptions.has(next)) nextIndex++;
+        if (valueOptions.has(next)) {
+          if (nextIndex < segmentEnd) gitOptions.push(tokens[nextIndex].value);
+          nextIndex++;
+        }
       }
     }
 
     segmentStart = index + 1;
   }
 
-  return commitIndices;
+  return commitInfos;
 }
 
-function getGitCommitIndex(tokens) {
-  return getGitCommitIndices(tokens)[0] ?? -1;
+function isShellExecutable(value) {
+  return /(?:^|[\\/])(?:sh|bash|zsh|dash|ksh)(?:\.exe)?$/i.test(value);
 }
 
-function getCommitCommandTokens(command) {
+function getShellWrapperCommands(tokens) {
+  let index = 0;
+  while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index].value)) index++;
+
+  const first = tokens[index]?.value;
+  if (!['sudo', 'env', 'command', 'exec', 'nice', 'nohup'].includes(first) && !isShellExecutable(first)) {
+    return [];
+  }
+
+  const commands = [];
+  for (; index < tokens.length; index++) {
+    if (!isShellExecutable(tokens[index].value)) continue;
+    const option = tokens[index + 1]?.value || '';
+    if (option !== '-c' && !(/^-[^-]*c/.test(option))) continue;
+    const script = tokens[index + 2];
+    if (script && !script.operator) commands.push(script.value);
+  }
+  return commands;
+}
+
+function getCommandSubstitutions(command) {
+  const substitutions = [];
+  let quote = null;
+
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index];
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '\\') index++;
+      else if (char === '"') quote = null;
+      else if (char === '`') {
+        const end = findBacktickSubstitutionEnd(command, index + 1);
+        if (end !== -1) {
+          substitutions.push(command.slice(index + 1, end));
+          index = end;
+        }
+      } else if (char === '$' && command[index + 1] === '(') {
+        const end = findCommandSubstitutionEnd(command, index + 2);
+        if (end !== -1) {
+          substitutions.push(command.slice(index + 2, end));
+          index = end;
+        }
+      }
+      continue;
+    }
+    if (char === "'") {
+      quote = char;
+    } else if (char === '"') {
+      quote = char;
+    } else if (char === '`') {
+      const end = findBacktickSubstitutionEnd(command, index + 1);
+      if (end !== -1) {
+        substitutions.push(command.slice(index + 1, end));
+        index = end;
+      }
+    } else if (char === '$' && command[index + 1] === '(') {
+      const end = findCommandSubstitutionEnd(command, index + 2);
+      if (end !== -1) {
+        substitutions.push(command.slice(index + 2, end));
+        index = end;
+      }
+    }
+  }
+
+  return substitutions;
+}
+
+function findBacktickSubstitutionEnd(command, start) {
+  for (let index = start; index < command.length; index++) {
+    if (command[index] === '\\') {
+      index++;
+    } else if (command[index] === '`') {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function findCommandSubstitutionEnd(command, start) {
+  let depth = 1;
+  let quote = null;
+
+  for (let index = start; index < command.length; index++) {
+    const char = command[index];
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '\\') index++;
+      else if (char === '"') quote = null;
+      continue;
+    }
+    if (char === "'") quote = char;
+    else if (char === '"') quote = char;
+    else if (char === '$' && command[index + 1] === '(') {
+      depth++;
+      index++;
+    } else if (char === ')') {
+      depth--;
+      if (depth === 0) return index;
+    }
+  }
+
+  return -1;
+}
+
+function getCommitCommandTokenLists(command, seen = new Set()) {
+  if (seen.has(command)) return [];
+  const nextSeen = new Set(seen);
+  nextSeen.add(command);
+
   const tokens = parseShellCommand(command);
-  if (!tokens) return null;
-  const commitIndex = getGitCommitIndex(tokens);
-  return commitIndex === -1 ? null : tokens.slice(commitIndex + 1);
+  if (!tokens) return [];
+
+  const commitInfos = getDirectGitCommitCommandInfo(tokens);
+  for (const wrappedCommand of getShellWrapperCommands(tokens)) {
+    commitInfos.push(...getCommitCommandTokenLists(wrappedCommand, nextSeen));
+  }
+  for (const substitution of getCommandSubstitutions(command)) {
+    commitInfos.push(...getCommitCommandTokenLists(substitution, nextSeen));
+  }
+  return commitInfos;
+}
+
+function getCommitCommandInfo(command) {
+  return getCommitCommandTokenLists(command)[0] ?? null;
+}
+
+function readOptionArgument(args, index, attachedValue = '') {
+  if (attachedValue) {
+    return args[index].dynamic
+      ? { value: '', nextIndex: index }
+      : { value: attachedValue, nextIndex: index };
+  }
+
+  const next = args[index + 1];
+  if (!next || next.operator || next.dynamic) return { value: '', nextIndex: index };
+  return { value: next.value, nextIndex: index + 1 };
+}
+
+function getInheritedCommitMessage(revision, gitOptions = []) {
+  const result = spawnSync('git', [...gitOptions, 'show', '-s', '--format=%B', '--', revision], {
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 5000,
+    maxBuffer: MAX_STDIN
+  });
+  return result.status === 0 ? result.stdout : '';
 }
 
 function extractCommitMessage(command) {
-  const args = getCommitCommandTokens(command);
+  const commitInfo = getCommitCommandInfo(command);
+  const args = commitInfo?.args ?? null;
   if (!args) return null;
 
   const messages = [];
+  let inheritedRevision = null;
+  let inheritedMessage = false;
+
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
-    if (arg.operator) break;
+    if (arg.operator || arg.value === '--') break;
 
     if (arg.value === '-m' || arg.value === '--message') {
-      const messageArg = args[++index];
-      if (!messageArg || messageArg.operator || messageArg.dynamic) return '';
-      messages.push(messageArg.value);
+      const parsed = readOptionArgument(args, index);
+      if (!parsed.value && parsed.nextIndex === index) return '';
+      messages.push(parsed.value);
+      index = parsed.nextIndex;
       continue;
     }
 
     if (arg.value.startsWith('--message=')) {
-      if (arg.dynamic) return '';
-      messages.push(arg.value.slice('--message='.length));
+      if (arg.value === '--message=') {
+        messages.push('');
+        continue;
+      }
+      const parsed = readOptionArgument(args, index, arg.value.slice('--message='.length));
+      if (!parsed.value) return '';
+      messages.push(parsed.value);
+      continue;
+    }
+
+    if (arg.value === '--no-edit') {
+      inheritedMessage = true;
+      continue;
+    }
+
+    if (arg.value === '-C' || arg.value === '-c' || arg.value === '--reuse-message' || arg.value === '--reedit-message') {
+      const parsed = readOptionArgument(args, index);
+      if (!parsed.value && parsed.nextIndex === index) return '';
+      inheritedMessage = true;
+      inheritedRevision = parsed.value;
+      index = parsed.nextIndex;
+      continue;
+    }
+
+    if (arg.value.startsWith('--reuse-message=') || arg.value.startsWith('--reedit-message=')) {
+      const revision = arg.value.slice(arg.value.indexOf('=') + 1);
+      if (!revision || arg.dynamic) return '';
+      inheritedMessage = true;
+      inheritedRevision = revision;
       continue;
     }
 
     if (arg.value.startsWith('-') && !arg.value.startsWith('--')) {
       const shortOptions = arg.value.slice(1);
-      const messageOptionIndex = shortOptions.indexOf('m');
-      if (messageOptionIndex !== -1) {
-        if (arg.dynamic) return '';
-        const attachedMessage = shortOptions.slice(messageOptionIndex + 1);
-        if (attachedMessage.length > 0) {
-          messages.push(attachedMessage);
-          continue;
+      for (let optionIndex = 0; optionIndex < shortOptions.length; optionIndex++) {
+        const option = shortOptions[optionIndex];
+        if (option === 'm') {
+          const attachedMessage = shortOptions.slice(optionIndex + 1);
+          const parsed = readOptionArgument(args, index, attachedMessage);
+          if (!parsed.value && parsed.nextIndex === index) return '';
+          messages.push(parsed.value);
+          index = parsed.nextIndex;
+          break;
         }
-
-        const messageArg = args[++index];
-        if (!messageArg || messageArg.operator || messageArg.dynamic) return '';
-        messages.push(messageArg.value);
+        if (option === 'c' || option === 'C') {
+          const revision = shortOptions.slice(optionIndex + 1);
+          const parsed = readOptionArgument(args, index, revision);
+          if (!parsed.value && parsed.nextIndex === index) return '';
+          inheritedMessage = true;
+          inheritedRevision = parsed.value;
+          index = parsed.nextIndex;
+          break;
+        }
+        if (option === 'F') return '';
+        if (option === 'S') break;
       }
+      continue;
+    }
+
+    if (arg.value.startsWith('--file') || arg.value === '--template' || arg.value.startsWith('--fixup') || arg.value.startsWith('--squash')) {
+      return '';
+    }
+
+    const longOption = arg.value.split('=', 1)[0];
+    if (['--author', '--date', '--cleanup', '--encoding', '--trailer'].includes(longOption) && !arg.value.includes('=')) {
+      const parsed = readOptionArgument(args, index);
+      if (parsed.nextIndex !== index) index = parsed.nextIndex;
     }
   }
 
-  return messages.length > 0 ? messages.join('\n\n') : null;
+  if (messages.length > 0) return messages.join('\n\n');
+  if (inheritedMessage) return getInheritedCommitMessage(inheritedRevision || 'HEAD', commitInfo.gitOptions);
+  return null;
 }
 
 /**
@@ -491,6 +706,14 @@ function resolveCommand(command) {
 
 function runLinterCommand(command, args) {
   const useShell = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
+  if (useShell && args.some(arg => /[&|<>()[\]^%!`"'\r\n]/.test(arg))) {
+    return {
+      status: 1,
+      stdout: '',
+      stderr: 'Unsafe linter argument rejected on Windows'
+    };
+  }
+
   return spawnSync(command, args, {
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -582,12 +805,11 @@ function evaluate(rawInput) {
     const command = input.tool_input?.command || '';
     
     // Only run for actual git commit commands
-    const parsedCommand = parseShellCommand(command);
-    const commitIndices = parsedCommand ? getGitCommitIndices(parsedCommand) : [];
-    if (commitIndices.length === 0) {
+    const commitCommands = getCommitCommandTokenLists(command);
+    if (commitCommands.length === 0) {
       return { output: rawInput, exitCode: 0 };
     }
-    if (commitIndices.length > 1) {
+    if (commitCommands.length > 1) {
       console.error('[Hook] ERROR: Run multiple git commit commands separately so each message can be validated.');
       console.error('[Hook] To bypass these checks, use: git commit --no-verify');
       return { output: rawInput, exitCode: 2 };

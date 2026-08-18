@@ -53,6 +53,16 @@ function runTests() {
     assert.strictEqual(result.stdout, '', 'Blocking hook should not pass through stdout');
   })) passed++; else failed++;
 
+  if (test('pre dispatcher applies commit validation only in strict profile', () => {
+    const input = { tool_input: { command: 'git commit -m "Bad message"' } };
+    const strict = runScript(preDispatcher, input, { ECC_HOOK_PROFILE: 'strict' });
+    assert.strictEqual(strict.status, 2, 'Strict profile should enforce commit messages');
+    assert.ok(strict.stderr.includes('Commit message does not follow conventional commit format'));
+
+    const standard = runScript(preDispatcher, input, { ECC_HOOK_PROFILE: 'standard' });
+    assert.strictEqual(standard.status, 0, 'Standard profile should skip strict commit validation');
+  })) passed++; else failed++;
+
   if (test('pre dispatcher emits no stdout for a plain command (regression: issue #2239)', () => {
     // A pass-through command (no sub-hook adds context) must NOT echo the
     // input event back to stdout — Claude Code validates hook stdout against
