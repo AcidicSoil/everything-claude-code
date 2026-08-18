@@ -20,6 +20,8 @@ const path = require('path');
 const fs = require('fs');
 
 const MAX_STDIN = 1024 * 1024; // 1MB limit
+const COMMIT_TYPES = ['feat', 'fix', 'docs', 'style', 'refactor', 'perf', 'test', 'chore', 'ci', 'build', 'revert'];
+const COMMIT_HEADER_MAX_LENGTH = 72;
 
 /**
  * Detect staged files for commit
@@ -166,62 +168,290 @@ function findFileIssues(filePath) {
   return issues;
 }
 
+function parseShellCommand(command) {
+  const tokens = [];
+  let value = '';
+  let dynamic = false;
+  let quote = null;
+  let started = false;
+
+  const pushWord = () => {
+    if (started) {
+      tokens.push({ value, dynamic, operator: false });
+      value = '';
+      dynamic = false;
+      started = false;
+    }
+  };
+
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index];
+
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      else value += char;
+      started = true;
+      continue;
+    }
+
+    if (quote === '"') {
+      if (char === '"') quote = null;
+      else if (char === '\\' && index + 1 < command.length) value += command[++index];
+      else {
+        if (char === '$' || char === '`') dynamic = true;
+        value += char;
+      }
+      started = true;
+      continue;
+    }
+
+    if (char === '\n' || char === '\r') {
+      pushWord();
+      tokens.push({ value: ';', dynamic: false, operator: true });
+      if (char === '\r' && command[index + 1] === '\n') index++;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      pushWord();
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      started = true;
+      continue;
+    }
+
+    if (char === '\\' && index + 1 < command.length) {
+      value += command[++index];
+      started = true;
+      continue;
+    }
+
+    if (';&|'.includes(char)) {
+      pushWord();
+      const next = command[index + 1];
+      const operator = (char === '&' && next === '&') || (char === '|' && next === '|')
+        ? `${char}${next}`
+        : char;
+      tokens.push({ value: operator, dynamic: false, operator: true });
+      if (operator.length === 2) index++;
+      continue;
+    }
+
+    if (char === '$' || char === '`') dynamic = true;
+    value += char;
+    started = true;
+  }
+
+  if (quote) return null;
+  pushWord();
+  return tokens;
+}
+
+function isGitExecutable(value) {
+  return value === 'git' || /[\\/]git(?:\.exe)?$/i.test(value);
+}
+
+function findGitExecutable(tokens, start, end) {
+  let index = start;
+  while (index < end && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index].value)) index++;
+
+  const first = tokens[index]?.value;
+  if (isGitExecutable(first)) return index;
+
+  if (first === 'sudo') {
+    index++;
+    while (index < end && tokens[index].value.startsWith('-')) {
+      const option = tokens[index++].value;
+      if (['-u', '--user', '-g', '--group', '-C', '--chdir'].includes(option)) index++;
+    }
+  } else if (first === 'env') {
+    index++;
+    while (index < end) {
+      const value = tokens[index].value;
+      if (value.startsWith('-')) {
+        index++;
+      } else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(value)) {
+        index++;
+      } else {
+        break;
+      }
+    }
+  } else if (first === 'command') {
+    index++;
+    while (index < end && tokens[index].value.startsWith('-')) index++;
+  }
+
+  return index < end && isGitExecutable(tokens[index].value) ? index : -1;
+}
+
+function getGitCommitIndices(tokens) {
+  const valueOptions = new Set([
+    '-C', '--git-dir', '--work-tree', '--namespace', '-c', '--config-env',
+    '--exec-path', '--super-prefix'
+  ]);
+  const commitIndices = [];
+  let segmentStart = 0;
+
+  for (let index = 0; index <= tokens.length; index++) {
+    if (index < tokens.length && !tokens[index].operator) continue;
+
+    const segmentEnd = index;
+    const gitIndex = findGitExecutable(tokens, segmentStart, segmentEnd);
+    if (gitIndex !== -1) {
+      let nextIndex = gitIndex + 1;
+      while (nextIndex < segmentEnd) {
+        const next = tokens[nextIndex].value;
+        if (next === 'commit') {
+          commitIndices.push(nextIndex);
+          break;
+        }
+        if (!next.startsWith('-')) break;
+        nextIndex++;
+        if (valueOptions.has(next)) nextIndex++;
+      }
+    }
+
+    segmentStart = index + 1;
+  }
+
+  return commitIndices;
+}
+
+function getGitCommitIndex(tokens) {
+  return getGitCommitIndices(tokens)[0] ?? -1;
+}
+
+function getCommitCommandTokens(command) {
+  const tokens = parseShellCommand(command);
+  if (!tokens) return null;
+  const commitIndex = getGitCommitIndex(tokens);
+  return commitIndex === -1 ? null : tokens.slice(commitIndex + 1);
+}
+
+function extractCommitMessage(command) {
+  const args = getCommitCommandTokens(command);
+  if (!args) return null;
+
+  const messages = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg.operator) break;
+
+    if (arg.value === '-m' || arg.value === '--message') {
+      const messageArg = args[++index];
+      if (!messageArg || messageArg.operator || messageArg.dynamic) return '';
+      messages.push(messageArg.value);
+      continue;
+    }
+
+    if (arg.value.startsWith('--message=')) {
+      if (arg.dynamic) return '';
+      messages.push(arg.value.slice('--message='.length));
+      continue;
+    }
+
+    if (arg.value.startsWith('-') && !arg.value.startsWith('--')) {
+      const shortOptions = arg.value.slice(1);
+      const messageOptionIndex = shortOptions.indexOf('m');
+      if (messageOptionIndex !== -1) {
+        if (arg.dynamic) return '';
+        const attachedMessage = shortOptions.slice(messageOptionIndex + 1);
+        if (attachedMessage.length > 0) {
+          messages.push(attachedMessage);
+          continue;
+        }
+
+        const messageArg = args[++index];
+        if (!messageArg || messageArg.operator || messageArg.dynamic) return '';
+        messages.push(messageArg.value);
+      }
+    }
+  }
+
+  return messages.length > 0 ? messages.join('\n\n') : null;
+}
+
 /**
  * Validate commit message format
- * @param {string} command 
+ * @param {string} command
  * @returns {object|null} Validation result or null if no message to validate
  */
 function validateCommitMessage(command) {
-  // Extract commit message from command (quote-aware: when quoted, capture to the
-  // matching closing quote, consuming escaped chars (\") so an embedded escaped
-  // quote does not truncate the subject, and allowing the OTHER quote char inside
-  // the body; when unquoted, capture the full remaining tail, not just the first token)
-  const messageMatch = command.match(/(?:-m|--message)[=\s]+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^"']+?)\s*$)/);
-  if (!messageMatch) return null;
-  
-  const message = messageMatch[1] ?? messageMatch[2] ?? messageMatch[3];
+  const message = extractCommitMessage(command);
+  if (message === null) return null;
+  const header = message.split(/\r?\n/, 1)[0];
   const issues = [];
-  
-  // Check conventional commit format
-  const conventionalCommit = /^(feat|fix|docs|style|refactor|test|chore|build|ci|perf|revert)(\(.+\))?:\s*.+/;
-  if (!conventionalCommit.test(message)) {
+  const conventionalCommit = /^([A-Za-z][A-Za-z0-9-]*)(?:\(([^()\r\n]*)\))?(!?):([^\r\n]*)$/;
+  const match = header.match(conventionalCommit);
+
+  if (!match) {
     issues.push({
       type: 'format',
       message: 'Commit message does not follow conventional commit format',
-      suggestion: 'Use format: type(scope): description (e.g., "feat(auth): add login flow")'
+      suggestion: 'Use format: type(scope)!: description (e.g., "feat(auth): add login flow")'
     });
-  }
-  
-  // Check message length
-  if (message.length > 72) {
-    issues.push({
-      type: 'length',
-      message: `Commit message too long (${message.length} chars, max 72)`,
-      suggestion: 'Keep the first line under 72 characters'
-    });
-  }
-  
-  // Check for lowercase first letter (conventional)
-  if (conventionalCommit.test(message)) {
-    const afterColon = message.split(':')[1];
-    if (afterColon && /^[A-Z]/.test(afterColon.trim())) {
+  } else {
+    const [, type, scope, , rawSubject] = match;
+    const subject = rawSubject.trimStart();
+
+    if (!COMMIT_TYPES.includes(type)) {
+      issues.push({
+        type: 'type',
+        message: `Commit type must be one of: ${COMMIT_TYPES.join(', ')}`,
+        suggestion: 'Use a lowercase Conventional Commit type'
+      });
+    }
+
+    if (scope !== undefined && scope.trim().length === 0) {
+      issues.push({
+        type: 'scope',
+        message: 'Commit scope must not be empty',
+        suggestion: 'Remove the empty scope or provide a scope name'
+      });
+    }
+
+    if (subject.trim().length > 0 && !/^\s+/.test(rawSubject)) {
+      issues.push({
+        type: 'format',
+        message: 'Commit header must include a space after the colon',
+        suggestion: 'Use format: type(scope)!: description'
+      });
+    }
+
+    if (subject.trim().length === 0) {
+      issues.push({
+        type: 'subject-empty',
+        message: 'Commit subject must not be empty',
+        suggestion: 'Add a lowercase subject after the colon'
+      });
+    } else if (subject !== subject.toLowerCase()) {
       issues.push({
         type: 'capitalization',
-        message: 'Subject should start with lowercase after type',
-        suggestion: 'Use lowercase for the first letter of the subject'
+        message: 'Subject should be lowercase',
+        suggestion: 'Use lowercase for the entire subject'
+      });
+    }
+
+    if (subject.trimEnd().endsWith('.')) {
+      issues.push({
+        type: 'punctuation',
+        message: 'Commit message should not end with a period',
+        suggestion: 'Remove the trailing period from the subject'
       });
     }
   }
-  
-  // Check for trailing period
-  if (message.endsWith('.')) {
+
+  if (header.length > COMMIT_HEADER_MAX_LENGTH) {
     issues.push({
-      type: 'punctuation',
-      message: 'Commit message should not end with a period',
-      suggestion: 'Remove the trailing period'
+      type: 'length',
+      message: `Commit message header too long (${header.length} chars, max ${COMMIT_HEADER_MAX_LENGTH})`,
+      suggestion: `Keep the first line at most ${COMMIT_HEADER_MAX_LENGTH} characters`
     });
   }
-  
+
   return { message, issues };
 }
 
@@ -351,26 +581,26 @@ function evaluate(rawInput) {
     const input = JSON.parse(rawInput);
     const command = input.tool_input?.command || '';
     
-    // Only run for git commit commands
-    if (!command.includes('git commit')) {
+    // Only run for actual git commit commands
+    const parsedCommand = parseShellCommand(command);
+    const commitIndices = parsedCommand ? getGitCommitIndices(parsedCommand) : [];
+    if (commitIndices.length === 0) {
       return { output: rawInput, exitCode: 0 };
     }
-    
-    // Check if this is an amend (skip checks for amends to avoid blocking)
-    if (command.includes('--amend')) {
-      return { output: rawInput, exitCode: 0 };
+    if (commitIndices.length > 1) {
+      console.error('[Hook] ERROR: Run multiple git commit commands separately so each message can be validated.');
+      console.error('[Hook] To bypass these checks, use: git commit --no-verify');
+      return { output: rawInput, exitCode: 2 };
     }
-    
     // Get staged files
     const stagedFiles = getStagedFiles();
     
     if (stagedFiles.length === 0) {
       console.error('[Hook] No staged files found. Use "git add" to stage files first.');
-      return { output: rawInput, exitCode: 0 };
+    } else {
+      console.error(`[Hook] Checking ${stagedFiles.length} staged file(s)...`);
     }
-    
-    console.error(`[Hook] Checking ${stagedFiles.length} staged file(s)...`);
-    
+
     // Check each staged file
     const filesToCheck = stagedFiles.filter(shouldCheckFile);
     let totalIssues = 0;
@@ -398,12 +628,12 @@ function evaluate(rawInput) {
     if (messageValidation && messageValidation.issues.length > 0) {
       console.error('\nCommit Message Issues:');
       for (const issue of messageValidation.issues) {
-        console.error(`  WARNING ${issue.message}`);
+        console.error(`  ERROR ${issue.message}`);
         if (issue.suggestion) {
           console.error(`     TIP ${issue.suggestion}`);
         }
         totalIssues++;
-        warningCount++;
+        errorCount++;
       }
     }
     
@@ -437,6 +667,7 @@ function evaluate(rawInput) {
       
       if (errorCount > 0) {
         console.error('\n[Hook] ERROR: Commit blocked due to critical issues. Fix them before committing.');
+        console.error('[Hook] To bypass these checks, use: git commit --no-verify');
         return { output: rawInput, exitCode: 2 };
       } else {
         console.error('\n[Hook] WARNING: Warnings found. Consider fixing them, but commit is allowed.');

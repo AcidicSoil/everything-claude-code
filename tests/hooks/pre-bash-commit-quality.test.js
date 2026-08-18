@@ -160,7 +160,18 @@ if (test('allows git commit when no files are staged', () => {
   });
 })) passed++; else failed++;
 
-if (test('allows warning-only issues while reporting console TODO and message warnings', () => {
+if (test('validates commit messages even when no files are staged', () => {
+  inTempRepo(() => {
+    const input = JSON.stringify({ tool_input: { command: 'git commit --allow-empty -m "Bad message"' } });
+    const { result, stderr } = captureConsoleError(() => hook.evaluate(input));
+
+    assert.strictEqual(result.output, input);
+    assert.strictEqual(result.exitCode, 2);
+    assert.ok(stderr.includes('Commit message does not follow conventional commit format'), `expected message validation, got: ${stderr}`);
+  });
+})) passed++; else failed++;
+
+if (test('allows non-critical file warnings while reporting a valid commit message', () => {
   inTempRepo(repoDir => {
     writeAndStage(repoDir, 'index.js', [
       'console.log("debug only");',
@@ -174,7 +185,7 @@ if (test('allows warning-only issues while reporting console TODO and message wa
 
     const input = JSON.stringify({
       tool_input: {
-        command: 'git commit -m "fix: Uppercase subject."'
+        command: 'git commit -m "fix: report hook warnings"'
       }
     });
     const { result, stderr } = captureConsoleError(() => hook.evaluate(input));
@@ -183,17 +194,15 @@ if (test('allows warning-only issues while reporting console TODO and message wa
     assert.strictEqual(result.exitCode, 0, 'warning-only issues should not block');
     assert.ok(stderr.includes('WARNING Line 1'), `expected console warning, got: ${stderr}`);
     assert.ok(stderr.includes('INFO Line 2'), `expected TODO info warning, got: ${stderr}`);
-    assert.ok(stderr.includes('Subject should start with lowercase'), `expected capitalization warning, got: ${stderr}`);
-    assert.ok(stderr.includes('should not end with a period'), `expected punctuation warning, got: ${stderr}`);
     assert.ok(stderr.includes('Warnings found'), `expected warning summary, got: ${stderr}`);
   });
 })) passed++; else failed++;
 
-if (test('reports invalid and long commit messages without blocking when files are clean', () => {
+if (test('blocks invalid and long commit messages when files are clean', () => {
   inTempRepo(repoDir => {
     writeAndStage(repoDir, 'index.js', 'const clean = true;\n');
 
-    const longMessage = `Bad message ${'x'.repeat(80)}`;
+    const longMessage = `feat: ${'x'.repeat(67)}`;
     const input = JSON.stringify({
       tool_input: {
         command: `git commit --message="${longMessage}"`
@@ -202,9 +211,9 @@ if (test('reports invalid and long commit messages without blocking when files a
     const { result, stderr } = captureConsoleError(() => hook.evaluate(input));
 
     assert.strictEqual(result.output, input);
-    assert.strictEqual(result.exitCode, 0);
-    assert.ok(stderr.includes('does not follow conventional commit format'), `expected format warning, got: ${stderr}`);
-    assert.ok(stderr.includes('Commit message too long'), `expected length warning, got: ${stderr}`);
+    assert.strictEqual(result.exitCode, 2, 'invalid commit messages should block');
+    assert.ok(stderr.includes('ERROR Commit message header too long'), `expected length error, got: ${stderr}`);
+    assert.ok(stderr.includes('To bypass these checks, use: git commit --no-verify'), `expected bypass guidance, got: ${stderr}`);
   });
 })) passed++; else failed++;
 
@@ -346,6 +355,185 @@ if (test('isPlaceholderSecret does NOT suppress real high-entropy secrets', () =
   }
 })) passed++; else failed++;
 
+// --- Conventional Commit policy ---
+
+if (test('accepts every supported type with optional scopes', () => {
+  const types = ['feat', 'fix', 'docs', 'style', 'refactor', 'perf', 'test', 'chore', 'ci', 'build', 'revert'];
+  for (const type of types) {
+    assert.deepStrictEqual(hook.validateCommitMessage(`git commit -m "${type}: add change"`).issues, [], type);
+    assert.deepStrictEqual(hook.validateCommitMessage(`git commit -m "${type}(core): add change"`).issues, [], `${type} scope`);
+  }
+})) passed++; else failed++;
+
+if (test('accepts breaking-change markers and breaking-change footers', () => {
+  for (const message of [
+    'feat!: change api',
+    'feat(ui)!: change api',
+    'feat(ui): change api\n\nBREAKING CHANGE: update clients.'
+  ]) {
+    assert.deepStrictEqual(hook.validateCommitMessage(`git commit -m "${message}"`).issues, [], message);
+  }
+})) passed++; else failed++;
+
+if (test('accepts valid bodies without applying header rules to body text', () => {
+  const message = [
+    'fix(parser): handle empty input',
+    '',
+    'This body explains the change and ends with a period.',
+    `${'body '.repeat(30)}Closes #123.`
+  ].join('\n');
+  const result = hook.validateCommitMessage(`git commit -m "${message}"`);
+
+  assert.strictEqual(result.message.split(/\r?\n/, 1)[0], 'fix(parser): handle empty input');
+  assert.deepStrictEqual(result.issues, []);
+})) passed++; else failed++;
+
+if (test('rejects invalid formats, uppercase values, empty subjects, and trailing periods', () => {
+  const invalidMessages = [
+    'update parser',
+    'feature: add parser',
+    'feat(): add parser',
+    'feat(parser: add parser',
+    'feat add parser',
+    'FEAT: add parser',
+    'feat: Add parser',
+    'feat: add parser.'
+  ];
+
+  for (const message of invalidMessages) {
+    const result = hook.validateCommitMessage(`git commit -m "${message}"`);
+    assert.ok(result.issues.length > 0, `expected invalid message: ${message}`);
+  }
+
+  assert.ok(hook.validateCommitMessage('git commit -m "feat:"').issues.some(i => i.type === 'format' || i.type === 'subject-empty'));
+})) passed++; else failed++;
+
+if (test('enforces the 72-character header limit, not total message length', () => {
+  const exactHeader = `feat: ${'x'.repeat(66)}`;
+  const longHeader = `feat: ${'x'.repeat(67)}`;
+
+  assert.strictEqual(exactHeader.length, 72);
+  assert.ok(!hook.validateCommitMessage(`git commit -m "${exactHeader}"`).issues.some(i => i.type === 'length'));
+  assert.ok(hook.validateCommitMessage(`git commit -m "${longHeader}"`).issues.some(i => i.type === 'length'));
+})) passed++; else failed++;
+
+if (test('extracts only standalone message options and supports attached or repeated values', () => {
+  const valid = hook.validateCommitMessage('git commit --author="Dev --message invalid" -m"feat: add parser" -m "body ends."');
+
+  assert.ok(valid, 'expected a validation result');
+  assert.strictEqual(valid.message, 'feat: add parser\n\nbody ends.');
+  assert.deepStrictEqual(valid.issues, []);
+
+  const longForm = hook.validateCommitMessage('git commit --message "feat: add parser"');
+  assert.ok(longForm, 'expected a long-form message validation result');
+  assert.strictEqual(longForm.message, 'feat: add parser');
+  assert.deepStrictEqual(longForm.issues, []);
+
+  const dynamic = hook.validateCommitMessage('git commit -m "$MSG"');
+  assert.ok(dynamic && dynamic.issues.length > 0, 'dynamic messages should be rejected as unverifiable');
+
+  const firstCommand = hook.validateCommitMessage('git commit -m "feat: good"\ngit commit -m "BAD"');
+  assert.ok(firstCommand, 'expected the first command to be parsed');
+  assert.strictEqual(firstCommand.message, 'feat: good');
+  assert.deepStrictEqual(firstCommand.issues, []);
+})) passed++; else failed++;
+
+if (test('does not treat unrelated command text as a git commit', () => {
+  inTempRepo(repoDir => {
+    writeAndStage(repoDir, 'index.js', 'debugger;\n');
+
+    const input = JSON.stringify({
+      tool_input: { command: 'printf \'git commit -m "Bad message"\'' }
+    });
+    const result = hook.evaluate(input);
+
+    assert.strictEqual(result.exitCode, 0, 'unrelated commands should pass through');
+  });
+})) passed++; else failed++;
+
+if (test('validates common git wrappers instead of allowing a bypass', () => {
+  for (const command of [
+    'sudo git commit -m "fix: Bad subject"',
+    'env ECC_TEST=1 git commit -m "fix: Bad subject"',
+    'command git commit -m "fix: Bad subject"'
+  ]) {
+    const result = hook.validateCommitMessage(command);
+    assert.ok(result && result.issues.length > 0, `expected wrapper command to be validated: ${command}`);
+  }
+})) passed++; else failed++;
+
+if (test('validates git commits with global git options', () => {
+  for (const command of [
+    'git -C /tmp/repo commit -m "fix: Bad subject"',
+    'git --git-dir=/tmp/repo/.git commit -m "fix: Bad subject"',
+    'git --work-tree /tmp/repo commit -m "fix: Bad subject"',
+    'git -c user.name=ecc commit -m "fix: Bad subject"'
+  ]) {
+    const result = hook.validateCommitMessage(command);
+    assert.ok(result && result.issues.length > 0, `expected global-option command to be validated: ${command}`);
+  }
+})) passed++; else failed++;
+
+if (test('blocks assignment-prefixed git commits from bypassing validation', () => {
+  const result = hook.validateCommitMessage('ECC_TEST=1 git commit -m "fix: Bad subject"');
+  assert.ok(result && result.issues.length > 0, 'expected assignment-prefixed command to be validated');
+})) passed++; else failed++;
+
+if (test('blocks compound commands instead of validating only the first commit', () => {
+  inTempRepo(repoDir => {
+    writeAndStage(repoDir, 'index.js', 'const clean = true;\n');
+
+    const input = JSON.stringify({
+      tool_input: { command: 'git commit -m "fix: good"; git commit -m "fix: Bad subject"' }
+    });
+    const { result, stderr } = captureConsoleError(() => hook.evaluate(input));
+
+    assert.strictEqual(result.exitCode, 2);
+    assert.ok(stderr.includes('Run multiple git commit commands separately'), `expected compound-command error, got: ${stderr}`);
+  });
+})) passed++; else failed++;
+
+if (test('blocks dynamic commit messages that cannot be validated', () => {
+  inTempRepo(repoDir => {
+    writeAndStage(repoDir, 'index.js', 'const clean = true;\n');
+
+    const input = JSON.stringify({
+      tool_input: { command: 'git commit -m "$MSG"' }
+    });
+    const result = hook.evaluate(input);
+
+    assert.strictEqual(result.exitCode, 2);
+  });
+})) passed++; else failed++;
+
+if (test('validates amend messages instead of bypassing the policy', () => {
+  inTempRepo(repoDir => {
+    writeAndStage(repoDir, 'index.js', 'const clean = true;\n');
+
+    const input = JSON.stringify({
+      tool_input: { command: 'git commit --amend -m "fix: Bad subject"' }
+    });
+    const { result, stderr } = captureConsoleError(() => hook.evaluate(input));
+
+    assert.strictEqual(result.exitCode, 2);
+    assert.ok(stderr.includes('ERROR Subject should be lowercase'), `expected amend validation error, got: ${stderr}`);
+  });
+})) passed++; else failed++;
+
+if (test('validates combined short options that include -m', () => {
+  inTempRepo(repoDir => {
+    writeAndStage(repoDir, 'index.js', 'const clean = true;\n');
+
+    const input = JSON.stringify({
+      tool_input: { command: 'git commit -am "fix: Bad subject"' }
+    });
+    const { result, stderr } = captureConsoleError(() => hook.evaluate(input));
+
+    assert.strictEqual(result.exitCode, 2);
+    assert.ok(stderr.includes('ERROR Subject should be lowercase'), `expected combined-option validation error, got: ${stderr}`);
+  });
+})) passed++; else failed++;
+
 // --- Quote-aware commit-message extraction (truncation fix) ---
 
 if (test('captures full double-quoted -m message containing an apostrophe', () => {
@@ -362,7 +550,7 @@ if (test('captures full single-quoted -m message containing a double quote', () 
 if (test('captures full double-quoted -m message with escaped inner quotes (not truncated)', () => {
   const res = hook.validateCommitMessage('git commit -m "fix: say \\"hello\\" to the user"');
   assert.ok(res, 'expected a validation result');
-  assert.strictEqual(res.message, 'fix: say \\"hello\\" to the user');
+  assert.strictEqual(res.message, 'fix: say "hello" to the user');
 })) passed++; else failed++;
 
 if (test('measures length of the full message past an apostrophe (not the truncated prefix)', () => {

@@ -132,7 +132,7 @@ Troubleshoot failures: check test isolation → verify mocks → fix implementat
 
 ## Git Workflow
 
-**Commit format:** `<type>: <description>` — Types: feat, fix, refactor, docs, test, chore, perf, ci
+**Commit format:** `<type>(<scope>)!: <subject>` — Types: feat, fix, docs, style, refactor, perf, test, chore, ci, build, revert; lowercase subject, no trailing period, max 72-character header
 
 **PR workflow:** Analyze full commit history → draft comprehensive summary → include test plan → push with `-u` flag.
 

@@ -54,27 +54,32 @@ If nothing staged, stop: "No files matched your description."
 
 ## Phase 3 — COMMIT
 
-Craft a single-line commit message in imperative mood:
+Craft a commit message in imperative mood:
 
 ```
-{type}: {description}
+{type}([scope])[!]: {description}
 ```
 
 Types:
 - `feat` — New feature or capability
 - `fix` — Bug fix
-- `refactor` — Code restructuring without behavior change
 - `docs` — Documentation changes
+- `style` — Formatting, no code change
+- `refactor` — Code restructuring without behavior change
+- `perf` — Performance improvement
 - `test` — Adding or updating tests
 - `chore` — Build, config, dependencies
-- `perf` — Performance improvement
 - `ci` — CI/CD changes
+- `build` — Build-system changes
+- `revert` — Revert a previous commit
 
 Rules:
-- Imperative mood ("add feature" not "added feature")
-- Lowercase after the type prefix
-- No period at the end
-- Under 72 characters
+- Use a lowercase type from the list above
+- Scope is optional; add `!` before the colon for breaking changes
+- Use a non-empty, entirely lowercase subject
+- No period at the end of the subject
+- Keep the first line at or under 72 characters
+- An optional body or footer may follow the header
 - Describe WHAT changed, not HOW
 
 ```bash

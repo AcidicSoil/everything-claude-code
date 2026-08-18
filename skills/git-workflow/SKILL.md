@@ -94,18 +94,24 @@ main (production releases)
 ### Conventional Commits Format
 
 ```
-<type>(<scope>): <subject>
+<type>(<scope>)!: <subject>
 
 [optional body]
 
 [optional footer(s)]
 ```
 
+Rules:
+- Use a lowercase type from `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`, `ci`, `build`, or `revert`.
+- Scope is optional; add `!` before the colon for breaking changes.
+- Use a non-empty, entirely lowercase subject with no trailing period.
+- Keep the header (the first line) at or under 72 characters; bodies and footers may follow.
+
 ### Types
 
 | Type | Use For | Example |
 |------|---------|---------|
-| `feat` | New feature | `feat(auth): add OAuth2 login` |
+| `feat` | New feature | `feat(auth): add oauth2 login` |
 | `fix` | Bug fix | `fix(api): handle null response in user endpoint` |
 | `docs` | Documentation | `docs(readme): update installation instructions` |
 | `style` | Formatting, no code change | `style: fix indentation in login component` |
@@ -113,8 +119,9 @@ main (production releases)
 | `test` | Adding/updating tests | `test(auth): add unit tests for token validation` |
 | `chore` | Maintenance tasks | `chore(deps): update dependencies` |
 | `perf` | Performance improvement | `perf(query): add index to users table` |
-| `ci` | CI/CD changes | `ci: add PostgreSQL service to test workflow` |
-| `revert` | Revert previous commit | `revert: revert "feat(auth): add OAuth2 login"` |
+| `ci` | CI/CD changes | `ci: add postgresql service to test workflow` |
+| `build` | Build-system changes | `build: update release tooling` |
+| `revert` | Revert previous commit | `revert: revert "feat(auth): add oauth2 login"` |
 
 ### Good vs Bad Examples
 
@@ -125,7 +132,7 @@ git commit -m "updates"
 git commit -m "WIP"
 
 # GOOD: Clear, specific, explains why
-git commit -m "fix(api): retry requests on 503 Service Unavailable
+git commit -m "fix(api): retry requests on 503 service unavailable
 
 The external API occasionally returns 503 errors during peak hours.
 Added exponential backoff retry logic with max 3 attempts.
@@ -138,10 +145,10 @@ Closes #123"
 Create `.gitmessage` in repo root:
 
 ```
-# <type>(<scope>): <subject>
-# # Types: feat, fix, docs, style, refactor, test, chore, perf, ci, revert
-# Scope: api, ui, db, auth, etc.
-# Subject: imperative mood, no period, max 50 chars
+# <type>(<scope>)!: <subject>
+# # Types: feat, fix, docs, style, refactor, perf, test, chore, ci, build, revert
+# Scope: optional (api, ui, db, auth, etc.)
+# Subject: imperative mood, lowercase, no period, max 72 chars
 #
 # [optional body] - explain why, not what
 # [optional footer] - Breaking changes, closes #issue
@@ -225,9 +232,9 @@ git push --force-with-lease origin feature/user-auth
 <type>(<scope>): <description>
 
 Examples:
-feat(auth): add SSO support for enterprise users
+feat(auth): add sso support for enterprise users
 fix(api): resolve race condition in order processing
-docs(api): add OpenAPI specification for v2 endpoints
+docs(api): add openapi specification for v2 endpoints
 ```
 
 ### PR Description Template
@@ -559,7 +566,7 @@ git checkout -b feature/user-auth
 
 # 3. Make changes and commit
 git add .
-git commit -m "feat(auth): implement OAuth2 login"
+git commit -m "feat(auth): implement oauth2 login"
 
 # 4. Push to remote
 git push -u origin feature/user-auth
@@ -612,7 +619,7 @@ git push origin main
 git checkout HEAD -- path/to/file
 
 # Fix last commit message
-git commit --amend -m "New message"
+git commit --amend -m "fix: update message"
 
 # Add forgotten file to last commit
 git add forgotten-file
