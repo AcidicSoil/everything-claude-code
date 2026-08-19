@@ -19,22 +19,45 @@ Use the shell, CI runner, or provider runtime to load the values.
 
 ## Provider credentials and endpoints
 
-### Anthropic and GitHub
+### Provider selection and credentials
 
 | Variable | Status | Default | Accepted values | Scope and purpose |
 |---|---|---|---|---|
-| `ANTHROPIC_API_KEY` | Conditional required | None | Opaque non-empty API credential | Anthropic provider processes and provider-backed security or model tooling. |
+| `LLM_PROVIDER` | Optional | `claude` | `claude`, `openai`, `ollama`, `astraflow`, `astraflow_cn`, `atlas` | Provider selected by the Python resolver when no provider argument is passed. |
+| `ANTHROPIC_API_KEY` | Conditional required | None | Opaque non-empty API credential | Authentication for the Anthropic provider adapter. |
+| `OPENAI_API_KEY` | Conditional required | None | Opaque non-empty API credential | Authentication for the OpenAI provider adapter. |
 | `GITHUB_TOKEN` | Conditional required | None | Opaque GitHub token | Release and discussion announcement workflows and explicit GitHub API operations. |
 
-`ANTHROPIC_API_KEY` is read by the Claude provider when an API key is not
-passed directly. The core `ecc` install, catalog, plan, and local diagnostics
-commands do not require it.
+The Python provider resolver uses this precedence for provider selection:
+explicit `get_provider()` argument, `LLM_PROVIDER`, `LLM_PROVIDER` in `.llm.env`,
+then `claude`. The `.llm.env` selector file is separate from `.env.example`;
+ECC does not load `.env.example` or `.env` automatically.
+
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are read by their Python provider
+adapters when an API key is not passed directly. They are not Claude Code CLI
+general runtime credentials: Claude Code uses its own runtime configuration,
+such as `ANTHROPIC_AUTH_TOKEN` for the gateway example in the README. The core
+`ecc` install, catalog, plan, and local diagnostics commands do not require
+provider credentials.
 
 `GITHUB_TOKEN` is not automatically retained for every GitHub CLI operation.
 The platform-audit and related coordination paths remove the ambient token by
 default; `--use-env-github-token` is an explicit opt-in when a token is needed.
-Store both values in a secret manager or CI secret store, not in tracked files,
-command arguments, or memory entries.
+Store credential values in a secret manager or CI secret store, not in tracked
+files, command arguments, or memory entries.
+
+### OpenAI-compatible and local providers
+
+| Variable | Status | Default | Accepted values | Scope and purpose |
+|---|---|---|---|---|
+| `OLLAMA_BASE_URL` | Optional | `http://localhost:11434` | Endpoint string; no URL-format validation in the adapter | Base URL for the local Ollama API. |
+| `OLLAMA_MODEL` | Optional | `llama3.2` | Local model identifier; no enum validation | Default model for the Ollama provider. |
+
+The OpenAI adapter reads `OPENAI_API_KEY`; it does not read an OpenAI base-URL
+environment variable. Pass a custom base URL through the provider constructor.
+The Ollama adapter uses `OLLAMA_BASE_URL` and `OLLAMA_MODEL` and requires no API
+credential. Provider availability and model validity are enforced by the
+provider service.
 
 ### Astraflow / UModelVerse
 
@@ -78,10 +101,17 @@ model examples. The adapter implementation is in
 |---|---|---|---|---|
 | `ECC_AGENT_DATA_HOME` | Optional | `~/.claude`; Cursor hook sessions default to `~/.cursor/ecc` | Absolute path, `~`-prefixed path, or relative path resolved from the current working directory | Root for ECC session summaries, learned skills, aliases, and metrics. |
 
-The value is resolved as a path. Cursor project configuration may provide a
-trusted default under the standard Claude or Cursor ECC data roots; an explicit
-`ECC_AGENT_DATA_HOME` override takes precedence. Separate roots prevent Claude
-Code and Cursor sessions from sharing or overwriting each other's data. See
+The value is resolved as a path. Resolution precedence is:
+
+1. `ECC_AGENT_DATA_HOME` in the process environment.
+2. `.cursor/ecc-agent-data.json` in the project, using `agentDataHome` or
+   `ECC_AGENT_DATA_HOME`.
+3. `~/.cursor/ecc` when the process is a Cursor hook runtime.
+4. `~/.claude` otherwise.
+
+Project configuration values are accepted only when they stay within the
+standard Cursor or Claude ECC data roots. Separate roots prevent Claude Code
+and Cursor sessions from sharing or overwriting each other's data. See
 [`scripts/lib/agent-data-home.js`](../scripts/lib/agent-data-home.js) and the
 [agent-data isolation section in the README](../README.md#agent-data-home-multi-harness-isolation).
 
@@ -91,15 +121,15 @@ The runtime variable is `CLAUDE_PACKAGE_MANAGER`.
 
 | Variable | Status | Default | Accepted values | Scope and purpose |
 |---|---|---|---|---|
-| `CLAUDE_PACKAGE_MANAGER` | Optional | `npm` after configured and file-based detection | `npm`, `pnpm`, `yarn`, `bun` | Canonical package-manager override for ECC's Node runtime and setup helpers. |
-| `CLAUDE_CODE_PACKAGE_MANAGER` | Compatibility / CI only | None | `npm`, `pnpm`, `yarn`, `bun` | Compatibility value used by CI and ECC2 session lanes; not the canonical Node CLI override. |
+| `CLAUDE_PACKAGE_MANAGER` | Optional | `npm` after configured and file-based detection | `npm`, `pnpm`, `yarn`, `bun` | Canonical override for ECC's package-manager resolver and setup helpers after dependencies are installed. It does not select the dependency bootstrap command in `install.sh` or `install.ps1`; both invoke `npm`. |
+| `CLAUDE_CODE_PACKAGE_MANAGER` | Compatibility / CI only | None | `npm`, `pnpm`, `yarn`, `bun` | Compatibility value used by CI and ECC2 session lanes; `ecc` does not read it as a runtime override. |
 
 `CLAUDE_PACKAGE_MANAGER` has precedence over project configuration,
 `package.json`, lock-file detection, and the global preference file. Use this
-variable for runtime behavior. `CLAUDE_CODE_PACKAGE_MANAGER` remains in the
-template for compatibility consumers that still export the older name. ECC2's
-session manager mirrors both names into managed child environments, and the
-package's compatibility test lane reads the older name; the canonical Node
+variable for resolver behavior. `CLAUDE_CODE_PACKAGE_MANAGER` remains in the
+template only for compatibility consumers that still export the older name.
+ECC2's session manager mirrors both names into managed child environments, and
+the package's compatibility test lane reads the older name; the canonical Node
 resolver does not. The resolver is implemented in
 [`scripts/lib/package-manager.js`](../scripts/lib/package-manager.js), while the
 ECC2 compatibility path is in

@@ -26,10 +26,12 @@ legacy language name is routed to `install`; other unrecognized command names
 fail with an error. `ecc-install` invokes the installer directly for existing
 install flows.
 
-`--dry-run` sets `ECC_DRY_RUN=1` before dispatch. The command must implement
-that flag to produce a preview. Install, setup, repair, auto-update, and
-uninstall have dry-run behavior. The `ito` bridge rejects dry-run because its
-operations are delegated to a separately installed authenticated client.
+The dispatcher accepts `--dry-run` and sets `ECC_DRY_RUN=1` in the child
+environment; it does not add `--dry-run` to the child command's arguments. Use
+the command-specific `--dry-run` option for setup, install, guided install,
+repair, auto-update, and uninstall previews. The `ito` bridge rejects the
+`ECC_DRY_RUN` marker because its operations are delegated to a separately
+installed authenticated client.
 
 `ecc help <command>` runs the selected command with `--help`. Command-specific
 help is the authoritative list of options for that command.
@@ -128,7 +130,7 @@ options. Targets include `claude`, `claude-project`, `cursor`, `antigravity`,
 
 | Option family | Examples | Effect |
 |---|---|---|
-| Profiles | `--profile minimal`, `--profile core`, `--profile full` | Select a named install profile. |
+| Profiles | `--profile <profile>` (`minimal`, `core`, `developer`, `security`, `research`, `full`) | Select a named install profile. |
 | Targets | `--target claude`, `--target cursor` | Select the harness destination. |
 | Components | `--modules hooks-runtime`, `--skills tdd-workflow,security-review` | Select modules or skills. |
 | Guided setup | `--guided`, `--harness claude --harness codex` | Run the multi-harness wizard. |
@@ -150,7 +152,13 @@ ecc install-plan [options]
 ```
 
 `install-plan` is the compatibility name for the same selective-install plan
-surface. Common options are:
+surface. Listing options are:
+
+- `--list-profiles` lists available install profiles.
+- `--list-modules` lists install modules.
+- `--list-components` lists user-facing install components.
+
+Common resolution options are:
 
 - `--family <family>`
 - `--profile <profile>`
@@ -183,8 +191,9 @@ filters the catalog for a harness target.
 ecc consult "security reviews" [--target claude] [--limit <n>] [--json]
 ```
 
-`--target` defaults to `claude`; `--limit` defaults to `5`. The result contains
-matching components, related profiles, and preview or install commands.
+`--target` defaults to `claude`; `--limit` defaults to `5` and is capped at `20`.
+The result contains matching components, related profiles, and preview or install
+commands.
 `consult` recommends; it does not apply an installation.
 
 ### Lifecycle commands
@@ -225,10 +234,11 @@ ecc memory <init|save|handoff|search|read|doctor> [options]
 | `doctor` | Report malformed files, duplicate IDs, broken links, and skipped symlinks. |
 
 `save` and `handoff` accept bodies only through `--stdin` or `--body-file`.
-They do not accept memory bodies as command-line values. `--kind`, `--link`,
-`--scope`, `--tag`, and `--target-harness` are repeatable metadata options
-where supported. Memory entries are unreviewed context, not executable
-instructions or policy.
+They do not accept memory bodies as command-line values. `--source-harness`,
+`--kind`, `--link`, `--scope`, and `--tag` are metadata options; `--target` is
+repeatable for handoff target harnesses, while `--target-harness` is a
+single-value search filter. Memory entries are unreviewed context, not
+executable instructions or policy.
 
 ### `sessions` and `session-inspect`
 
@@ -237,12 +247,14 @@ ecc sessions [<session-id>] [--db <path>] [--json] [--limit <n>]
 ecc session-inspect <target> [options]
 ```
 
-`sessions` lists or inspects state-store sessions. `session-inspect` accepts
+`sessions` defaults `--limit` to `10` when listing recent sessions. It lists or
+inspects state-store sessions. `session-inspect` accepts
 canonical targets such as `claude:latest`, direct session files, dmux plans,
 and skill-analysis targets. Its options are:
 
 - `--adapter <id>` and `--target-type <type>` select the history adapter.
-- `--write <output.json>` writes the snapshot to a file.
+- `--write <output.json>` writes the snapshot to a file; the snapshot is also
+  emitted to standard output.
 - `--list-adapters` lists available adapters without inspecting a target.
 
 Use command-specific help for target grammar and write-mode constraints.
@@ -255,7 +267,7 @@ ecc work-items <list|show|upsert|close|claim|sync-github> [options]
 
 The command supports linked Linear, GitHub, handoff, and manual records. Common
 options include `--title`, `--source`, `--source-id`, `--status`, `--owner`,
-`--as agent|human`, `--repo-root`, `--repo`/`--github-repo`,
+`--as agent|human`, `--repo-root`, `--repo`, `--github-repo`,
 `--session`/`--session-id`, `--metadata-json`, `--db`, and `--json`.
 
 ### `status` and `loop-status`
@@ -265,15 +277,17 @@ ecc status [--json|--markdown] [--write <path>] [--limit <n>] [--exit-code]
 ecc loop-status [options]
 ```
 
-`status` emits a state-store readiness summary. `--json` and `--markdown` are
-mutually exclusive; `--write` writes Markdown output to a file. With
-`--exit-code`, `status` returns `2` when readiness needs attention.
+`status` emits a state-store readiness summary; `--limit` defaults to `5`.
+`--json` and `--markdown` are mutually exclusive; `--write` writes the selected
+JSON or Markdown output to a file. With `--exit-code`, `status` returns `2` when
+readiness needs attention.
 
 `loop-status` accepts `--json`, `--home <dir>`, `--transcript <session.jsonl>`,
-`--limit <n>`, `--bash-timeout-seconds <n>`, `--wake-grace-multiplier <n>`,
-`--now <time>`, `--exit-code`, `--watch`, `--watch-count <n>`,
-`--watch-interval-seconds <n>`, and `--write-dir <dir>`. It can inspect a home
-directory or a single transcript and can return a computed status code.
+`--limit <n>` (default `10`), `--bash-timeout-seconds <n>` (default `1800`),
+`--wake-grace-multiplier <n>` (default `2`), `--now <time>`, `--exit-code`,
+`--watch`, `--watch-count <n>`, `--watch-interval-seconds <n>` (default `5`),
+and `--write-dir <dir>`. It can inspect a home directory or a single transcript
+and can return a computed status code.
 
 ### `control-pane`
 
@@ -306,7 +320,7 @@ ecc platform-audit [options]
 |---|---|
 | `--format text\|json\|markdown` | Select the report format. |
 | `--json`, `--markdown` | Format aliases. |
-| `--write <path>` | Write the report to a file. |
+| `--write <path>` | Write the JSON or Markdown report to a file; requires a non-text format. |
 | `--root <path>` | Select the audit root. |
 | `--repo <owner/name>` | Add a GitHub repository to the audit. |
 | `--skip-github` | Skip GitHub queries. |
@@ -324,12 +338,13 @@ is intentionally required for the audit.
 ### `security-ioc-scan`
 
 ```text
-ecc security-ioc-scan [--root <path>] [--home <path>] [--json]
+ecc security-ioc-scan [--root <path>] [--home [--home-dir <path>]] [--json]
 ```
 
-`--home` and `--home-dir` select the home directory used for persistence-surface
-checks. `--json` selects machine-readable output. A clean scan exits `0`; scan
-findings exit `1`; invalid arguments or runtime failures exit `2`.
+`--home` enables additional user-level persistence-surface checks;
+`--home-dir <path>` overrides the directory used by those checks. `--json`
+selects machine-readable output. A clean scan exits `0`; scan findings exit
+`1`; invalid arguments or runtime failures exit `2`.
 
 ### `ito`
 
