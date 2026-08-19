@@ -33,8 +33,10 @@ repair, auto-update, and uninstall previews. The `ito` bridge rejects the
 `ECC_DRY_RUN` marker because its operations are delegated to a separately
 installed authenticated client.
 
-`ecc help <command>` runs the selected command with `--help`. Command-specific
-help is the authoritative list of options for that command.
+For commands that implement `--help`, `ecc help <command>` runs the selected
+command with that flag. Command-specific help is the authoritative list of
+options for that command. `welcome` is an exception: its options are documented
+below, but `ecc help welcome` is not supported.
 
 ## Command groups
 
@@ -94,11 +96,13 @@ files in a harness directory.
 ### `welcome`
 
 ```text
-ecc welcome
+ecc welcome [--action <action>] [--version <version>]
 ```
 
-Prints the ECC welcome artwork and community links. It accepts no command-specific
-options.
+Prints the ECC welcome artwork and community links. `--action` accepts
+`installed`, `updated`, `configured`, `migrated`, `resumed`, or
+`already-migrated`; it defaults to `installed`. `--version` accepts an ECC
+version string and is optional.
 
 ### `setup`
 
@@ -338,7 +342,7 @@ is intentionally required for the audit.
 ### `security-ioc-scan`
 
 ```text
-ecc security-ioc-scan [--root <path>] [--home [--home-dir <path>]] [--json]
+ecc security-ioc-scan [--root <path>] [--home] [--home-dir <path>] [--json]
 ```
 
 `--home` enables additional user-level persistence-surface checks;
